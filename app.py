@@ -1,379 +1,789 @@
-
+"""
+Softpro Sentiment & Sales Insights
+Professional Streamlit Application
+Version: 2.0.0
+"""
 
 import os
 import io
 import tempfile
 from datetime import datetime
-from dateutil import parser
+from pathlib import Path
+from typing import Optional, Dict, List, Tuple
+import hashlib
+import re
 
 import numpy as np
 import pandas as pd
-
 import streamlit as st
 import plotly.express as px
+import plotly.graph_objects as go
+import matplotlib.pyplot as plt
+from wordcloud import WordCloud
+from dateutil import parser
+from dotenv import load_dotenv
 
-from sklearn.model_selection import train_test_split
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report
+# Load environment variables
+load_dotenv()
 
+# ============================================
+# Configuration
+# ============================================
 
-#set the Enviroment Variable :-
-os.environ["PATH"] += os.pathsep + r"D:\Training\spi\Python-with-Datascience\my-softpro-project\softpro-Analytics\ffmpeg\bin"
+class Config:
+    """Application configuration"""
+    APP_NAME = os.getenv("APP_NAME", "Softpro Sentiment Insights")
+    APP_VERSION = os.getenv("APP_VERSION", "2.0.0")
+    WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
+    MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "2000"))
+    UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./uploads")
+    FFMPEG_PATH = os.getenv("FFMPEG_PATH", "")
+    
+    # Create upload directory
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    
+    # Setup FFMPEG
+    if FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
+        os.environ["PATH"] += os.pathsep + FFMPEG_PATH
 
-# Import with Expectional Handling.
-try:
-    import whisper  # OpenAI Whisper
-except Exception:
-    whisper = None
+# Page configuration
+st.set_page_config(
+    page_title=Config.APP_NAME,
+    page_icon="🎯",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-try:
-    from vosk import Model as VoskModel, KaldiRecognizer
-    import wave
-except Exception:
-    VoskModel = None
-    KaldiRecognizer = None
+# Custom CSS
+st.markdown("""
+<style>
+    /* Main container */
+    .main-header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 2rem;
+        border-radius: 10px;
+        color: white;
+        margin-bottom: 2rem;
+    }
+    
+    /* Metrics cards */
+    .metric-card {
+        background: white;
+        padding: 1rem;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        text-align: center;
+        margin: 0.5rem;
+    }
+    
+    .metric-value {
+        font-size: 2rem;
+        font-weight: bold;
+        color: #667eea;
+    }
+    
+    .metric-label {
+        font-size: 0.9rem;
+        color: #666;
+        margin-top: 0.5rem;
+    }
+    
+    /* Recommendation cards */
+    .rec-high {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        padding: 1rem;
+        border-radius: 10px;
+        color: white;
+        margin: 0.5rem 0;
+    }
+    
+    .rec-medium {
+        background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
+        padding: 1rem;
+        border-radius: 10px;
+        margin: 0.5rem 0;
+    }
+    
+    .rec-low {
+        background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%);
+        padding: 1rem;
+        border-radius: 10px;
+        margin: 0.5rem 0;
+    }
+    
+    /* Sidebar */
+    .sidebar .sidebar-content {
+        background: #f8f9fa;
+    }
+    
+    /* Buttons */
+    .stButton > button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        padding: 0.5rem 1rem;
+        border-radius: 5px;
+        font-weight: bold;
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    }
+    
+    /* Progress bar */
+    .stProgress > div > div > div > div {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+    
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 2rem;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        background: transparent;
+        border-radius: 5px;
+        padding: 0.5rem 1rem;
+        font-weight: bold;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-from transformers import pipeline
+# ============================================
+# Utility Functions
+# ============================================
 
-# -----------------------------
-# Streamlit Page Config
-# -----------------------------
-st.set_page_config(page_title="Softpro Sentiment & Sales Insights", layout="wide")
-st.title("Softpro Sentiment & Sales Insights")
-st.caption("Audio + CRM logs → Transcripts → Sentiment → Insights → Recommendations")
+@st.cache_data(ttl=3600)
+def cache_audio_hash(audio_bytes: bytes) -> str:
+    """Generate hash for audio file caching"""
+    return hashlib.md5(audio_bytes).hexdigest()
 
-# -----------------------------
-# Sidebar Controls
-# -----------------------------
-st.sidebar.header("Settings")
-asr_engine = st.sidebar.selectbox("ASR Engine (Audio → Text)", ["Whisper", "Vosk (offline)"])
-if asr_engine == "Whisper":
-    whisper_size = st.sidebar.selectbox("Whisper model size", ["tiny", "base", "small", "medium"], index=1)
-else:
-    vosk_model_dir = st.sidebar.text_input("Vosk model directory (unzipped)", value="")
-
-# st.sidebar.markdown("---")
-# use_pretrained = st.sidebar.checkbox("Force Pretrained Sentiment (skip training even if labels exist)", value=False)
-
-st.sidebar.markdown("---")
-st.sidebar.write("**Export**")
-save_intermediate = st.sidebar.checkbox("Save processed CSV", value=True)
-
-# -----------------------------
-# Utilities
-# -----------------------------
-@st.cache_resource(show_spinner=False)
-def load_whisper(model_size: str):
-    if whisper is None:
-        raise RuntimeError("Whisper not installed. pip install openai-whisper and ensure ffmpeg is present.")
-    return whisper.load_model(model_size)
-
-@st.cache_resource(show_spinner=False)
-def load_vosk(model_dir: str):
-    if not model_dir or not os.path.isdir(model_dir):
-        raise RuntimeError("Valid Vosk model directory not provided.")
-    if VoskModel is None:
-        raise RuntimeError("Vosk not installed. pip install vosk")
-    return VoskModel(model_dir)
-
-# High Frequency pipelines to be loaded 
-# open source distilbert-base-uncased-finetuned-sst-2-english
-# https://huggingface.co/distilbert/distilbert-base-uncased-finetuned-sst-2-english
-# sentiment Analysis best model 
-@st.cache_resource(show_spinner=False)
-def load_hf_pipeline():
-    # Fast, widely used binary sentiment model
-    return pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
-
-@st.cache_resource(show_spinner=False)
-def train_sklearn_sentiment(texts: pd.Series, labels: pd.Series):
-    # labels expected as strings: positive/neutral/negative (case-insensitive is handled)
-    y = labels.astype(str).str.lower().replace({
-        "pos": "positive",
-        "neg": "negative",
-        "neu": "neutral",
-        "n": "negative",
-        "p": "positive"
-    })
-    X_train, X_test, y_train, y_test = train_test_split(texts, y, test_size=0.2, random_state=42, stratify=y)
-    vectorizer = TfidfVectorizer(ngram_range=(1,2), min_df=2, max_features=50000)
-    Xtr = vectorizer.fit_transform(X_train)
-    Xte = vectorizer.transform(X_test)
-    clf = LogisticRegression(max_iter=200)
-    clf.fit(Xtr, y_train)
-    y_pred = clf.predict(Xte)
-    report = classification_report(y_test, y_pred, output_dict=False)
-    return vectorizer, clf, report
-
+def preprocess_text(text: str) -> str:
+    """Clean and preprocess text"""
+    if pd.isna(text):
+        return ""
+    
+    text = str(text).lower()
+    # Remove special characters
+    text = re.sub(r'[^\w\s\.\!\?\,]', ' ', text)
+    # Remove extra whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 def safe_parse_date(x):
-    if pd.isna(x):
+    """Robust date parsing"""
+    if pd.isna(x) or x is None:
         return None
     try:
-        return parser.parse(str(x), dayfirst=False, yearfirst=True)
-    except Exception:
-        return None
-
-
-def transcribe_with_whisper(audio_bytes: bytes, model, filename: str) -> str:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1] or ".wav") as tmp:
-        tmp.write(audio_bytes)
-        tmp.flush()
-        path = tmp.name
-    try:
-        result = model.transcribe(path)
-        return result.get("text", "").strip()
-    finally:
-        try:
-            os.remove(path)
-        except Exception:
-            pass
-
-
-def transcribe_with_vosk(audio_bytes: bytes, model, filename: str) -> str:
-    # Vosk expects WAV PCM 16k mono. We'll try to coerce using wave if already wav; otherwise rely on ffmpeg via whisper isn't possible here.
-    # For simplicity: if not WAV, we save and try to open. If not WAV PCM, we warn the user.
-    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1] or ".wav") as tmp:
-        tmp.write(audio_bytes)
-        tmp.flush()
-        path = tmp.name
-    try:
-        if not path.lower().endswith('.wav'):
-            return "[Vosk] Please upload WAV PCM audio (16k mono) or use Whisper for auto-conversion."
-        wf = wave.open(path, "rb")
-        if wf.getnchannels() != 1 or wf.getsampwidth() != 2:
-            return "[Vosk] WAV must be mono 16-bit PCM. Convert your file or use Whisper."
-        rec = KaldiRecognizer(model, wf.getframerate())
-        rec.SetWords(True)
-        text_pieces = []
-        while True:
-            data = wf.readframes(4000)
-            if len(data) == 0:
-                break
-            if rec.AcceptWaveform(data):
-                res = rec.Result()
-                text_pieces.append(res)
-        final = rec.FinalResult()
-        text_pieces.append(final)
-        # Combine naive
-        return " ".join(text_pieces)
-    except Exception as e:
-        return f"[Vosk Error] {e}"
-    finally:
-        try:
-            os.remove(path)
-        except Exception:
-            pass
-
-
-# -----------------------------
-# File Uploaders
-# -----------------------------
-st.subheader("1) Upload Data")
-col1, col2 = st.columns([1,1])
-with col1:
-    csv_file = st.file_uploader("Upload CSV logs (remarks, student, year, tech stack, location, date, optional label)", type=["csv"]) 
-with col2:
-    audio_files = st.file_uploader("Upload call recordings (mp3/wav)", type=["mp3", "wav", "m4a", "aac"], accept_multiple_files=True)
-
-# -----------------------------
-# Load DataFrame + Column Mapping
-# -----------------------------
-if csv_file is not None:
-    try:
-        df_raw = pd.read_csv(csv_file)
-    except Exception:
-        df_raw = pd.read_csv(csv_file, encoding="latin-1")
-    st.success(f"CSV loaded with shape {df_raw.shape}")
-    with st.expander("Map columns (flexible)"):
-        cols = ["<none>"] + list(df_raw.columns)
-        map_student = st.selectbox("Student Name column", cols, index=cols.index("student_name") if "student_name" in df_raw.columns else 0)
-        map_year = st.selectbox("Year column", cols, index=cols.index("year") if "year" in df_raw.columns else 0)
-        map_stack = st.selectbox("Tech Stack column", cols, index=cols.index("tech_stack") if "tech_stack" in df_raw.columns else 0)
-        map_loc = st.selectbox("Location column", cols, index=cols.index("location") if "location" in df_raw.columns else 0)
-        map_remarks = st.selectbox("Remarks/Notes column", cols, index=cols.index("remarks") if "remarks" in df_raw.columns else 0)
-        map_callid = st.selectbox("Call ID column (optional)", cols, index=cols.index("call_id") if "call_id" in df_raw.columns else 0)
-        map_date = st.selectbox("Date column (optional)", cols, index=cols.index("date") if "date" in df_raw.columns else 0)
-        map_label = st.selectbox("Sentiment label column (optional: positive/neutral/negative)", cols, index=cols.index("label") if "label" in df_raw.columns else 0)
-
-    def pick(colname):
-        return None if colname == "<none>" else df_raw[colname]
-
-    df = pd.DataFrame({
-        "call_id": pick(map_callid) if map_callid != "<none>" else pd.Series([None]*len(df_raw)),
-        "student_name": pick(map_student) if map_student != "<none>" else pd.Series([None]*len(df_raw)),
-        "year": pick(map_year) if map_year != "<none>" else pd.Series([None]*len(df_raw)),
-        "tech_stack": pick(map_stack) if map_stack != "<none>" else pd.Series([None]*len(df_raw)),
-        "location": pick(map_loc) if map_loc != "<none>" else pd.Series([None]*len(df_raw)),
-        "remarks": pick(map_remarks) if map_remarks != "<none>" else pd.Series([""]*len(df_raw)),
-        "date": pick(map_date) if map_date != "<none>" else pd.Series([None]*len(df_raw)),
-        "label": pick(map_label) if map_label != "<none>" else pd.Series([None]*len(df_raw)),
-    })
-    if "date" in df.columns:
-        df["date_parsed"] = df["date"].apply(safe_parse_date)
-    else:
-        df["date_parsed"] = None
-else:
-    df = None
-
-# -----------------------------
-# Transcribe Audio
-# -----------------------------
-transcripts = []
-if audio_files:
-    st.subheader("2) Transcribe Audio")
-    if asr_engine == "Whisper":
-        try:
-            whisper_model = load_whisper(whisper_size)
-        except Exception as e:
-            st.error(str(e))
-            whisper_model = None
-    else:
-        try:
-            vosk_model = load_vosk(vosk_model_dir)
-        except Exception as e:
-            st.error(str(e))
-            vosk_model = None
-
-    prog = st.progress(0)
-    for i, f in enumerate(audio_files):
-        audio_bytes = f.read()
-        if asr_engine == "Whisper" and whisper_model is not None:
-            text = transcribe_with_whisper(audio_bytes, whisper_model, f.name)
-        elif asr_engine == "Vosk (offline)" and 'vosk_model' in locals() and vosk_model is not None:
-            text = transcribe_with_vosk(audio_bytes, vosk_model, f.name)
-        else:
-            text = "[ASR not available]"
-        transcripts.append({
-            "call_id": os.path.splitext(os.path.basename(f.name))[0],
-            "transcript_text": text
-        })
-        prog.progress(int(((i+1)/len(audio_files))*100))
-    st.success(f"Transcribed {len(transcripts)} file(s)")
-
-if transcripts:
-    df_tr = pd.DataFrame(transcripts)
-else:
-    df_tr = pd.DataFrame(columns=["call_id", "transcript_text"])  # empty
-
-# -----------------------------
-# Merge Transcripts with CSV
-# -----------------------------
-if df is not None:
-    st.subheader("3) Merge Logs + Transcripts")
-    # Try join on call_id if available, else outer merge on index
-    if df["call_id"].notna().any() and not df_tr.empty:
-        merged = pd.merge(df, df_tr, on="call_id", how="outer")
-    else:
-        # append transcripts as new rows if missing call_id
-        merged = df.copy()
-        if not df_tr.empty:
-            extra = pd.DataFrame({
-                "call_id": df_tr["call_id"],
-                "student_name": None,
-                "year": None,
-                "tech_stack": None,
-                "location": None,
-                "remarks": "",
-                "date": None,
-                "label": None,
-                "date_parsed": None,
-                "transcript_text": df_tr["transcript_text"]
-            })
-            merged = pd.concat([merged, extra], ignore_index=True)
-
-        merged["remarks"] = merged.get("remarks", pd.Series([""] * len(merged))).fillna("")
-    if "transcript_text" not in merged.columns:
-        merged["transcript_text"] = ""
-    else:
-        merged["transcript_text"] = merged["transcript_text"].fillna("")
-        merged["combined_text"] = (merged["remarks"].astype(str) + " " + merged["transcript_text"].astype(str)).str.strip()
-
-    st.dataframe(merged.head(50), use_container_width=True)
-else:
-    merged = None
-
-# -----------------------------
-# Sentiment: Train or Pretrained
-# -----------------------------
-if merged is not None and len(merged) > 0:
-    st.subheader("4) Sentiment Analysis")
-    can_train = ("label" in merged.columns) and merged["label"].notna().any() and not use_pretrained
-
-    if can_train:
-        st.write("Training custom TF-IDF + LogisticRegression on provided labels…")
-        with st.spinner("Training model…"):
+        if isinstance(x, (datetime, pd.Timestamp)):
+            return x
+        for fmt in ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%Y/%m/%d']:
             try:
-                vectorizer, clf, report = train_sklearn_sentiment(merged["combined_text"].fillna("") , merged["label"])
-                st.text("Classification report (hold-out test):\n" + report)
-                # Prediction Algorithms for the custom model
-                
-                #x data : train 
-                #y data : test 
-                # 
-                Xall = vectorizer.transform(merged["combined_text"].fillna(""))
-                merged['sentiment'] = clf.predict(Xall)
-                merged['sentiment_score'] = np.nan
-                model_used = 'custom_sklearn'
-                
-            except Exception as e:
-                st.error(f"Training failed: {e}. Falling back to pretrained pipeline.")
-                can_train = False
-    #if training failes
-    if not can_train:
-        with st.spinner('Running pre-trained sentiment models'):
-            nlp = load_hf_pipeline()
-            preds = []
-            scores = []
-            for txt in merged["combined_text"].fillna(""):
-                try:
-                    # 1024,2098,4096
-                    r = nlp(txt[:4096])[0]
-                    label = r['label'].lower()
-                    
-                    # pasitive,negative or neutral
-                    if label == 'positive':
-                       preds.append('positive')
-                    elif label == 'negative':
-                        preds.append('negative')
-                    else:
-                        preds.append(label)
-                    scores.append(float(r.get('score',np.nan)))
-                except Exception as e:
-                    print(f' Exception in cannot train {str(e)}')
-                    st.error(f' Exception in cannot train {str(e)}')
-                    preds.append('neutral')
-                    scores.append(np.nan)
-            merged['sentiment'] = preds
-            merged['sentiment_score'] = scores
-            model_used = 'hf_distilbert'
-            
-st.success(f'sentiment computed using {model_used}')
+                return datetime.strptime(str(x), fmt)
+            except ValueError:
+                continue
+        return parser.parse(str(x), fuzzy=True)
+    except Exception:
+        return None
 
-#-------------------------------------
-## Analytics 
-#------------------------------------
-
-#locations,tech_stack
-st.subheader('5) Analytics')
-colA,colB,colC = st.columns(3)
-
-with colA: #distribution of the pie-chart 
-    fig = px.pie(merged,names='sentiment',title='sentiment distribution')
-    st.plotly_chart(fig,use_container_width=True)
-    
-#location Analytics 
-with colB:
-    if 'location' in merged.columns:
-        fig2 = px.bar(merged.fillna({'location','unknown'}),x='location',color='sentiment',title='sentiment by location')
-        st.plotly_chart(fig2,use_container_width=True)
-#tech stack Analytics 
-if 'tech_stack' in merged.columns:
-        fig3 = px.bar(merged.fillna({'tech_stack','unknown'}),x='tech_stack',color='sentiment',title='sentiment by tech stack')
-        st.plotly_chart(fig3,use_container_width=True)
+def generate_wordcloud(text_series: pd.Series):
+    """Generate word cloud from text"""
+    try:
+        text = ' '.join(text_series.dropna().astype(str))
+        if not text.strip():
+            return None
         
+        wordcloud = WordCloud(
+            width=800,
+            height=400,
+            background_color='white',
+            colormap='viridis',
+            max_words=100,
+            contour_width=1,
+            contour_color='steelblue'
+        ).generate(text)
+        
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.imshow(wordcloud, interpolation='bilinear')
+        ax.axis('off')
+        return fig
+    except Exception as e:
+        st.warning(f"Word cloud generation failed: {e}")
+        return None
 
+# ============================================
+# Sentiment Analysis Functions
+# ============================================
 
-#Trends Analysis
-#Negative Keywords 
+try:
+    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+    VADER_AVAILABLE = True
+except ImportError:
+    VADER_AVAILABLE = False
+    st.warning("VADER not available. Install with: pip install vaderSentiment")
+
+try:
+    from textblob import TextBlob
+    TEXTBLOB_AVAILABLE = True
+except ImportError:
+    TEXTBLOB_AVAILABLE = False
+
+def analyze_sentiment_vader(text: str) -> Tuple[str, float]:
+    """Analyze sentiment using VADER"""
+    if not VADER_AVAILABLE or not text:
+        return "neutral", 0.0
+    
+    analyzer = SentimentIntensityAnalyzer()
+    scores = analyzer.polarity_scores(text)
+    compound = scores['compound']
+    
+    if compound >= 0.05:
+        return "positive", compound
+    elif compound <= -0.05:
+        return "negative", compound
+    else:
+        return "neutral", compound
+
+def analyze_sentiment_textblob(text: str) -> Tuple[str, float]:
+    """Analyze sentiment using TextBlob"""
+    if not TEXTBLOB_AVAILABLE or not text:
+        return "neutral", 0.0
+    
+    blob = TextBlob(text)
+    polarity = blob.sentiment.polarity
+    
+    if polarity > 0.1:
+        return "positive", polarity
+    elif polarity < -0.1:
+        return "negative", polarity
+    else:
+        return "neutral", polarity
+
+# ============================================
+# Audio Transcription Functions
+# ============================================
+
+try:
+    import whisper
+    WHISPER_AVAILABLE = True
+except ImportError:
+    WHISPER_AVAILABLE = False
+    st.warning("Whisper not available. Install with: pip install openai-whisper")
+
+def transcribe_audio(audio_bytes: bytes, model_size: str = "base") -> Tuple[str, Dict]:
+    """Transcribe audio using Whisper"""
+    if not WHISPER_AVAILABLE:
+        return "Whisper not available", {"error": "Whisper not installed"}
+    
+    tmp_path = None
+    try:
+        model = whisper.load_model(model_size)
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
+            tmp_file.write(audio_bytes)
+            tmp_file.flush()
+            tmp_path = tmp_file.name
+        
+        result = model.transcribe(tmp_path, language='en', task='transcribe', verbose=False)
+        
+        metadata = {
+            "language": result.get('language', 'unknown'),
+            "duration": result.get('segments', [{}])[-1].get('end', 0) if result.get('segments') else 0,
+            "segments_count": len(result.get('segments', []))
+        }
+        
+        return result['text'], metadata
+        
+    except Exception as e:
+        return f"Transcription error: {str(e)}", {"error": str(e)}
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+
+# ============================================
+# Analytics Functions
+# ============================================
+
+def create_dashboard(df: pd.DataFrame):
+    """Create comprehensive analytics dashboard"""
+    
+    if df.empty:
+        st.warning("No data available")
+        return
+    
+    # Metrics Row
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        total = len(df)
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-value">{total}</div>
+            <div class="metric-label">Total Calls</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        positive = (df['sentiment'] == 'positive').mean() * 100 if 'sentiment' in df.columns else 0
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-value" style="color: #28a745;">{positive:.1f}%</div>
+            <div class="metric-label">Positive Sentiment</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col3:
+        negative = (df['sentiment'] == 'negative').mean() * 100 if 'sentiment' in df.columns else 0
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-value" style="color: #dc3545;">{negative:.1f}%</div>
+            <div class="metric-label">Negative Sentiment</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col4:
+        avg_score = df['sentiment_score'].mean() if 'sentiment_score' in df.columns else 0
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-value">{avg_score:.2f}</div>
+            <div class="metric-label">Avg Sentiment Score</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Tabs for different views
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Sentiment Analysis", "📍 Geographic", "💻 Tech Stack", "📈 Trends"])
+    
+    with tab1:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Pie chart
+            if 'sentiment' in df.columns:
+                fig_pie = px.pie(
+                    df, names='sentiment', title='Sentiment Distribution',
+                    color='sentiment',
+                    color_discrete_map={'positive': '#28a745', 'neutral': '#ffc107', 'negative': '#dc3545'},
+                    hole=0.3
+                )
+                st.plotly_chart(fig_pie, use_container_width=True)
+        
+        with col2:
+            # Word cloud
+            if 'combined_text' in df.columns:
+                st.subheader("Word Cloud")
+                fig_wc = generate_wordcloud(df['combined_text'])
+                if fig_wc:
+                    st.pyplot(fig_wc)
+    
+    with tab2:
+        if 'location' in df.columns and 'sentiment' in df.columns:
+            # Sentiment by location
+            location_data = df.groupby(['location', 'sentiment']).size().unstack(fill_value=0)
+            fig_loc = px.bar(
+                location_data,
+                title="Sentiment by Location",
+                barmode='stack',
+                color_discrete_map={'positive': '#28a745', 'neutral': '#ffc107', 'negative': '#dc3545'}
+            )
+            st.plotly_chart(fig_loc, use_container_width=True)
+    
+    with tab3:
+        if 'tech_stack' in df.columns and 'sentiment' in df.columns:
+            # Filter valid tech stacks
+            tech_df = df[df['tech_stack'].notna() & (df['tech_stack'] != 'Unknown')]
+            if len(tech_df) > 0:
+                positive_ratio = tech_df.groupby('tech_stack').apply(
+                    lambda x: (x['sentiment'] == 'positive').mean()
+                ).sort_values(ascending=False).head(10)
+                
+                fig_tech = px.bar(
+                    x=positive_ratio.values,
+                    y=positive_ratio.index,
+                    orientation='h',
+                    title="Top Performing Tech Stacks",
+                    labels={'x': 'Positive Ratio', 'y': 'Tech Stack'},
+                    color=positive_ratio.values,
+                    color_continuous_scale='Greens'
+                )
+                st.plotly_chart(fig_tech, use_container_width=True)
+    
+    with tab4:
+        if 'date_parsed' in df.columns:
+            df['date'] = pd.to_datetime(df['date_parsed'])
+            df['week'] = df['date'].dt.to_period('W').astype(str)
+            
+            weekly_data = df.groupby('week').agg({
+                'sentiment_score': 'mean',
+                'call_id': 'count'
+            }).reset_index()
+            
+            fig_trend = go.Figure()
+            fig_trend.add_trace(go.Scatter(
+                x=weekly_data['week'],
+                y=weekly_data['sentiment_score'],
+                name='Avg Sentiment',
+                line=dict(color='#667eea', width=3)
+            ))
+            fig_trend.add_trace(go.Bar(
+                x=weekly_data['week'],
+                y=weekly_data['call_id'],
+                name='Call Volume',
+                yaxis='y2',
+                marker_color='#764ba2'
+            ))
+            
+            fig_trend.update_layout(
+                title="Weekly Trends",
+                xaxis_title="Week",
+                yaxis_title="Sentiment Score",
+                yaxis2=dict(title="Call Volume", overlaying='y', side='right')
+            )
+            
+            st.plotly_chart(fig_trend, use_container_width=True)
+
+def generate_recommendations(df: pd.DataFrame) -> List[Dict]:
+    """Generate actionable recommendations"""
+    recommendations = []
+    
+    if df.empty or 'sentiment' not in df.columns:
+        return recommendations
+    
+    # Overall sentiment check
+    negative_ratio = (df['sentiment'] == 'negative').mean()
+    
+    if negative_ratio > 0.4:
+        recommendations.append({
+            "priority": "HIGH",
+            "title": "Critical: High Negative Sentiment",
+            "description": f"{negative_ratio:.1%} of calls show negative sentiment",
+            "action": "Schedule emergency team meeting. Review call scripts and counselor training immediately.",
+            "impact": "Expected 20% improvement in 2 weeks"
+        })
+    elif negative_ratio > 0.25:
+        recommendations.append({
+            "priority": "MEDIUM",
+            "title": "Moderate Negative Sentiment",
+            "description": f"{negative_ratio:.1%} negative calls detected",
+            "action": "Conduct focused training for underperforming counselors",
+            "impact": "Reduce negative sentiment by 10% in 1 month"
+        })
+    
+    # Location-based issues
+    if 'location' in df.columns:
+        for location in df['location'].dropna().unique():
+            loc_df = df[df['location'] == location]
+            neg_rate = (loc_df['sentiment'] == 'negative').mean()
+            
+            if neg_rate > 0.35 and len(loc_df) > 5:
+                recommendations.append({
+                    "priority": "MEDIUM",
+                    "title": f"Location Alert: {location}",
+                    "description": f"{neg_rate:.1%} negative rate with {len(loc_df)} calls",
+                    "action": f"Launch location-specific satisfaction survey and intervention program",
+                    "impact": "Improve local sentiment by 15%"
+                })
+    
+    # Keyword-based issues
+    if 'combined_text' in df.columns:
+        all_text = ' '.join(df['combined_text'].dropna().astype(str)).lower()
+        
+        issues = {
+            'fee': ("Pricing Concerns", "Introduce EMI, scholarships, or early bird discounts"),
+            'placement': ("Placement Anxiety", "Share success stories and placement statistics"),
+            'timing': ("Schedule Conflicts", "Offer flexible batch timings and weekend classes"),
+            'faculty': ("Faculty Quality", "Invest in instructor training and certification"),
+            'support': ("Support Issues", "Enhance mentorship and doubt-solving sessions")
+        }
+        
+        for keyword, (title, action) in issues.items():
+            if keyword in all_text:
+                recommendations.append({
+                    "priority": "MEDIUM",
+                    "title": title,
+                    "description": f"Multiple mentions of '{keyword}' detected in calls",
+                    "action": action,
+                    "impact": "Address key pain points effectively"
+                })
+                break
+    
+    # Positive reinforcement
+    positive_ratio = (df['sentiment'] == 'positive').mean()
+    if positive_ratio > 0.6:
+        recommendations.append({
+            "priority": "LOW",
+            "title": "Excellent Performance",
+            "description": f"{positive_ratio:.1%} positive sentiment achieved",
+            "action": "Document best practices, reward top performers, create case studies",
+            "impact": "Maintain and scale success"
+        })
+    
+    return recommendations
+
+# ============================================
+# Main Application
+# ============================================
+
+def main():
+    """Main application entry point"""
+    
+    # Header
+    st.markdown(f"""
+    <div class="main-header">
+        <h1>🎯 {Config.APP_NAME}</h1>
+        <p>Professional Sentiment Analysis & Sales Insights Platform | Version {Config.APP_VERSION}</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Sidebar
+    with st.sidebar:
+        st.markdown("## ⚙️ Settings")
+        
+        # Model selection
+        sentiment_model = st.selectbox(
+            "Sentiment Analysis Model",
+            ["VADER", "TextBlob", "Ensemble"],
+            help="Choose the sentiment analysis algorithm"
+        )
+        
+        st.markdown("---")
+        
+        # Audio settings
+        st.markdown("## 🎵 Audio Settings")
+        enable_cache = st.checkbox("Enable Caching", value=True)
+        show_transcription = st.checkbox("Show Full Transcription", value=False)
+        
+        st.markdown("---")
+        
+        # Export options
+        st.markdown("## 📤 Export")
+        export_format = st.selectbox("Export Format", ["CSV", "HTML Report", "JSON"])
+        
+        st.markdown("---")
+        st.markdown(f"### ℹ️ Info")
+        st.markdown(f"- Total processed: {len(st.session_state.get('processed_data', [])) if st.session_state.get('processed_data') is not None else 0} calls")
+        st.markdown(f"- Cache enabled: {enable_cache}")
+    
+    # Main content area
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("## 📁 Data Upload")
+        csv_file = st.file_uploader(
+            "Upload CRM Data (CSV)",
+            type=['csv'],
+            help="Upload CSV with student data, remarks, etc."
+        )
+    
+    with col2:
+        st.markdown("## 🎙️ Audio Upload")
+        audio_files = st.file_uploader(
+            "Upload Call Recordings",
+            type=['wav', 'mp3', 'm4a'],
+            accept_multiple_files=True,
+            help="Upload audio files of customer calls"
+        )
+    
+    # Initialize DataFrame
+    df = None
+    
+    # Process CSV
+    if csv_file:
+        try:
+            df = pd.read_csv(csv_file)
+            st.success(f"✅ Loaded {df.shape[0]} records")
+            
+            with st.expander("📊 Data Preview"):
+                st.dataframe(df.head(), use_container_width=True)
+                
+                # Column selection
+                text_col = st.selectbox("Select Text/Remarks Column", df.columns)
+                df['combined_text'] = df[text_col].fillna('')
+                
+                if 'date' in df.columns:
+                    df['date_parsed'] = df['date'].apply(safe_parse_date)
+                
+                # Ensure call_id exists
+                if 'call_id' not in df.columns:
+                    df['call_id'] = [f"call_{i}" for i in range(len(df))]
+                else:
+                    df['call_id'] = df['call_id'].astype(str)
+                    
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+            df = None
+    
+    # Process audio files
+    transcripts = []
+    if audio_files:
+        st.markdown("## 🎤 Audio Transcription")
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for idx, audio_file in enumerate(audio_files):
+            status_text.text(f"Processing: {audio_file.name}")
+            
+            # Check cache
+            audio_hash = cache_audio_hash(audio_file.getvalue())
+            
+            if enable_cache and audio_hash in st.session_state.get('transcripts_cache', {}):
+                transcript = st.session_state.transcripts_cache[audio_hash]
+            else:
+                transcript, _ = transcribe_audio(audio_file.getvalue(), Config.WHISPER_MODEL)
+                
+                if enable_cache:
+                    if 'transcripts_cache' not in st.session_state:
+                        st.session_state.transcripts_cache = {}
+                    st.session_state.transcripts_cache[audio_hash] = transcript
+            
+            transcripts.append({
+                'call_id': Path(audio_file.name).stem,
+                'transcript_text': transcript
+            })
+            
+            progress_bar.progress((idx + 1) / len(audio_files))
+        
+        status_text.text("✅ All audio files processed!")
+        
+        # Display transcripts
+        if show_transcription:
+            with st.expander("📝 Transcription Results"):
+                for trans in transcripts:
+                    st.text(trans['transcript_text'][:300] + "..." if len(trans['transcript_text']) > 300 else trans['transcript_text'])
+                    st.markdown("---")
+        
+        # Merge with CSV data
+        transcripts_df = pd.DataFrame(transcripts)
+        
+        if df is not None:
+            df = df.merge(transcripts_df, on='call_id', how='outer')
+            df['combined_text'] = df['combined_text'].fillna('').astype(str) + " " + df['transcript_text'].fillna('').astype(str)
+        else:
+            df = transcripts_df
+            df['combined_text'] = df['transcript_text']
+    
+    # Perform sentiment analysis
+    if df is not None and len(df) > 0:
+        st.markdown("---")
+        st.markdown("## 🔍 Sentiment Analysis")
+        
+        with st.spinner("Analyzing sentiments..."):
+            sentiments = []
+            scores = []
+            
+            for text in df['combined_text'].fillna(''):
+                processed_text = preprocess_text(text)[:Config.MAX_TEXT_LENGTH]
+                
+                if sentiment_model == "VADER":
+                    sent, score = analyze_sentiment_vader(processed_text)
+                elif sentiment_model == "TextBlob":
+                    sent, score = analyze_sentiment_textblob(processed_text)
+                else:  # Ensemble
+                    vader_sent, vader_score = analyze_sentiment_vader(processed_text)
+                    blob_sent, blob_score = analyze_sentiment_textblob(processed_text)
+                    sent = vader_sent if abs(vader_score) > abs(blob_score) else blob_sent
+                    score = (vader_score + blob_score) / 2
+                
+                sentiments.append(sent)
+                scores.append(score)
+            
+            df['sentiment'] = sentiments
+            df['sentiment_score'] = scores
+        
+        st.success(f"✅ Analysis complete for {len(df)} records")
+        
+        # Display dashboard
+        create_dashboard(df)
+        
+        # Display recommendations
+        st.markdown("---")
+        st.markdown("## 💡 Recommendations")
+        
+        recommendations = generate_recommendations(df)
+        
+        if recommendations:
+            for rec in recommendations:
+                priority_class = {
+                    "HIGH": "rec-high",
+                    "MEDIUM": "rec-medium",
+                    "LOW": "rec-low"
+                }.get(rec['priority'], "rec-medium")
+                
+                st.markdown(f"""
+                <div class="{priority_class}">
+                    <strong>🎯 {rec['title']}</strong><br>
+                    📊 {rec['description']}<br>
+                    💡 <strong>Action:</strong> {rec['action']}<br>
+                    📈 <strong>Expected Impact:</strong> {rec['impact']}
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("No critical issues detected. Keep up the good work!")
+        
+        # Export options
+        st.markdown("---")
+        st.markdown("## 📤 Export Results")
+        
+        if export_format == "CSV":
+            csv_data = df.to_csv(index=False)
+            st.download_button(
+                "📥 Download CSV",
+                csv_data,
+                f"softpro_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                "text/csv"
+            )
+        elif export_format == "HTML Report":
+            # Generate HTML report
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Softpro Analysis Report</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 40px; }}
+                    h1 {{ color: #667eea; }}
+                    .metrics {{ display: flex; gap: 20px; margin: 20px 0; }}
+                    .metric {{ background: #f0f2f6; padding: 20px; border-radius: 10px; }}
+                    table {{ border-collapse: collapse; width: 100%; }}
+                    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                    th {{ background: #667eea; color: white; }}
+                </style>
+            </head>
+            <body>
+                <h1>Softpro Sentiment Analysis Report</h1>
+                <p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                <div class="metrics">
+                    <div class="metric"><h3>Total Calls</h3>{len(df)}</div>
+                    <div class="metric"><h3>Positive</h3>{(df['sentiment'] == 'positive').mean() * 100:.1f}%</div>
+                    <div class="metric"><h3>Negative</h3>{(df['sentiment'] == 'negative').mean() * 100:.1f}%</div>
+                </div>
+                <h2>Sample Data</h2>
+                {df.head(20).to_html()}
+            </body>
+            </html>
+            """
+            
+            st.download_button(
+                "📄 Download HTML Report",
+                html_content,
+                f"softpro_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+                "text/html"
+            )
+        
+        # Save to session state
+        st.session_state.processed_data = df
+        st.session_state.analysis_complete = True
+        
+    else:
+        st.info("👈 Please upload CSV data and/or audio files to begin analysis")
+
+if __name__ == "__main__":
+    main()
