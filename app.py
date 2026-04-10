@@ -21,10 +21,9 @@ import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 from wordcloud import WordCloud
 from dateutil import parser
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+
+# Load environment variable
 
 # ============================================
 # Configuration
