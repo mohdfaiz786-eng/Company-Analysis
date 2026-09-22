@@ -21,9 +21,10 @@ import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 from wordcloud import WordCloud
 from dateutil import parser
+from dotenv import load_dotenv
 
-
-# Load environment variable
+# Load environment variables
+load_dotenv()
 
 # ============================================
 # Configuration
@@ -660,6 +661,7 @@ def main():
                     st.markdown("---")
         
         # Merge with CSV data
+     # Merge with CSV data
 transcripts_df = pd.DataFrame(transcripts)
 
 if df is not None:
@@ -689,7 +691,6 @@ else:
     df = transcripts_df
     df['combined_text'] = df['transcript_text'].fillna('')
     df['call_id'] = [f"audio_{i}" for i in range(len(df))]
-    
     
     # Perform sentiment analysis
     if df is not None and len(df) > 0:
