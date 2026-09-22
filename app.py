@@ -660,14 +660,36 @@ def main():
                     st.markdown("---")
         
         # Merge with CSV data
-        transcripts_df = pd.DataFrame(transcripts)
-        
-        if df is not None:
-            df = df.merge(transcripts_df, on='call_id', how='outer')
-            df['combined_text'] = df['combined_text'].fillna('').astype(str) + " " + df['transcript_text'].fillna('').astype(str)
-        else:
-            df = transcripts_df
-            df['combined_text'] = df['transcript_text']
+transcripts_df = pd.DataFrame(transcripts)
+
+if df is not None:
+    # Ensure both have call_id as string
+    df['call_id'] = df['call_id'].astype(str)
+    transcripts_df['call_id'] = transcripts_df['call_id'].astype(str)
+    
+    # Merge on call_id
+    df = df.merge(transcripts_df, on='call_id', how='outer')
+    
+    # ✅ FIX: Ensure columns exist before concatenation
+    if 'transcript_text' not in df.columns:
+        df['transcript_text'] = ''
+    else:
+        df['transcript_text'] = df['transcript_text'].fillna('')
+    
+    if 'combined_text' not in df.columns:
+        df['combined_text'] = ''
+    else:
+        df['combined_text'] = df['combined_text'].fillna('')
+    
+    # Safe concatenation
+    df['combined_text'] = df['combined_text'].astype(str) + " " + df['transcript_text'].astype(str)
+    df['combined_text'] = df['combined_text'].str.strip()
+    
+else:
+    df = transcripts_df
+    df['combined_text'] = df['transcript_text'].fillna('')
+    df['call_id'] = [f"audio_{i}" for i in range(len(df))]
+    
     
     # Perform sentiment analysis
     if df is not None and len(df) > 0:
